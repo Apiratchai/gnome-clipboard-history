@@ -32,3 +32,12 @@
 .ci-history-search-entry {
   width: 5em;
 }
+
+.ci-page-label {
+  min-width: 4em;
+  text-align: center;
+}
+
+.ci-image-preview {
+  margin-right: 8px;
+}

@@ -2,6 +2,7 @@
 // https://github.com/wooorm/linked-list/blob/d2390fe1cab9f780cfd34fa31c8fa8ede4ad674d/index.js
 
 export const TYPE_TEXT = 'text';
+export const TYPE_IMAGE = 'image';
 
 // Creates a new `Iterator` for looping over the `List`.
 class Iterator {
@@ -188,6 +189,8 @@ export class LLNode {
 
     if (this.type === TYPE_TEXT) {
       this.list.bytes += this.text.length;
+    } else if (this.type === TYPE_IMAGE) {
+      this.list.bytes += this.image.length;
     }
 
     let entries = this.list.invertedIndex[hash];
@@ -207,6 +210,8 @@ export class LLNode {
 
     if (this.type === TYPE_TEXT) {
       this.list.bytes -= this.text.length;
+    } else if (this.type === TYPE_IMAGE) {
+      this.list.bytes -= this.image.length;
     }
 
     const entries = this.list.invertedIndex[hash];
@@ -220,7 +225,9 @@ export class LLNode {
 
   _hash() {
     if (this.type === TYPE_TEXT) {
-      return _hashText(this.text);
+      return `text:${_hashText(this.text)}`;
+    } else if (this.type === TYPE_IMAGE) {
+      return `image:${_hashText(this.image)}`;
     } else {
       return null;
     }
@@ -341,7 +348,7 @@ export class LinkedList {
   }
 
   findTextItem(text) {
-    const entries = this.invertedIndex[_hashText(text)];
+    const entries = this.invertedIndex[`text:${_hashText(text)}`];
     if (!entries) {
       return null;
     }
@@ -349,6 +356,21 @@ export class LinkedList {
     for (let i = entries.length - 1; i >= 0; i--) {
       const item = this.idsToItems[entries[i]];
       if (item.type === TYPE_TEXT && item.text === text) {
+        return item;
+      }
+    }
+    return null;
+  }
+
+  findImageItem(image) {
+    const entries = this.invertedIndex[`image:${_hashText(image)}`];
+    if (!entries) {
+      return null;
+    }
+
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const item = this.idsToItems[entries[i]];
+      if (item.type === TYPE_IMAGE && item.image === image) {
         return item;
       }
     }

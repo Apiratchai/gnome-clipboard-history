@@ -28,6 +28,7 @@ const OP_TYPE_DELETE_TEXT = 2;
 const OP_TYPE_FAVORITE_ITEM = 3;
 const OP_TYPE_UNFAVORITE_ITEM = 4;
 const OP_TYPE_MOVE_ITEM_TO_END = 5;
+const OP_TYPE_SAVE_IMAGE = 6;
 
 const MAX_WASTED_OPS = 500;
 let uselessOpCount;
@@ -132,6 +133,26 @@ function _consumeStream(stream, state, callback) {
           node.diskId = node.id = state.nextId++;
           node.type = DS.TYPE_TEXT;
           node.text = text || '';
+          node.favorite = false;
+          state.entries.append(node);
+
+          loop();
+        },
+      );
+    } else if (opType === OP_TYPE_SAVE_IMAGE) {
+      stream.read_upto_async(
+        /*stop_chars=*/ '\0',
+        /*stop_chars_len=*/ 1,
+        0,
+        null,
+        (src, res) => {
+          const [image] = src.read_upto_finish(res);
+          src.read_byte(null);
+
+          const node = new DS.LLNode();
+          node.diskId = node.id = state.nextId++;
+          node.type = DS.TYPE_IMAGE;
+          node.image = image || '';
           node.favorite = false;
           state.entries.append(node);
 
@@ -346,6 +367,8 @@ export function resetDatabase(currentStateBuilder) {
 
             if (entry.type === DS.TYPE_TEXT) {
               _storeTextOp(entry.text)(dataStream);
+            } else if (entry.type === DS.TYPE_IMAGE) {
+              _storeImageOp(entry.image)(dataStream);
             } else {
               throw new TypeError('Unknown type: ' + entry.type);
             }
@@ -372,6 +395,19 @@ function _storeTextOp(text) {
   return (dataStream) => {
     dataStream.put_byte(OP_TYPE_SAVE_TEXT, null);
     dataStream.put_string(text, null);
+    dataStream.put_byte(0, null); // NUL terminator
+    return true;
+  };
+}
+
+export function storeImageEntry(image) {
+  _appendBytesToLog(_storeImageOp(image), -5);
+}
+
+function _storeImageOp(image) {
+  return (dataStream) => {
+    dataStream.put_byte(OP_TYPE_SAVE_IMAGE, null);
+    dataStream.put_string(image, null);
     dataStream.put_byte(0, null); // NUL terminator
     return true;
   };
