@@ -190,7 +190,7 @@ export class LLNode {
     if (this.type === TYPE_TEXT) {
       this.list.bytes += this.text.length;
     } else if (this.type === TYPE_IMAGE) {
-      this.list.bytes += this.image.length;
+      this.list.bytes += this.imageSize ?? this.image?.length ?? 0;
     }
 
     let entries = this.list.invertedIndex[hash];
@@ -211,7 +211,7 @@ export class LLNode {
     if (this.type === TYPE_TEXT) {
       this.list.bytes -= this.text.length;
     } else if (this.type === TYPE_IMAGE) {
-      this.list.bytes -= this.image.length;
+      this.list.bytes -= this.imageSize ?? this.image?.length ?? 0;
     }
 
     const entries = this.list.invertedIndex[hash];
@@ -227,7 +227,9 @@ export class LLNode {
     if (this.type === TYPE_TEXT) {
       return `text:${_hashText(this.text)}`;
     } else if (this.type === TYPE_IMAGE) {
-      return `image:${_hashText(this.image)}`;
+      return this.imageHash
+        ? `image:${this.imageHash}`
+        : `legacy-image:${_hashText(this.image || '')}`;
     } else {
       return null;
     }
@@ -362,15 +364,15 @@ export class LinkedList {
     return null;
   }
 
-  findImageItem(image) {
-    const entries = this.invertedIndex[`image:${_hashText(image)}`];
+  findImageItem(imageHash) {
+    const entries = this.invertedIndex[`image:${imageHash}`];
     if (!entries) {
       return null;
     }
 
     for (let i = entries.length - 1; i >= 0; i--) {
       const item = this.idsToItems[entries[i]];
-      if (item.type === TYPE_IMAGE && item.image === image) {
+      if (item.type === TYPE_IMAGE && item.imageHash === imageHash) {
         return item;
       }
     }

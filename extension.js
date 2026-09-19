@@ -2,6 +2,7 @@ import Clutter from 'gi://Clutter';
 import GObject from 'gi://GObject';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import GdkPixbuf from 'gi://GdkPixbuf';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
@@ -45,6 +46,15 @@ const INDICATOR_ICON = 'edit-paste-symbolic';
 
 const PAGE_SIZE = 50;
 const MAX_VISIBLE_CHARS = 200;
+const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+const THUMBNAIL_SIZE = 128;
+const IMAGE_MIMES = [
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+  'image/bmp',
+];
 
 let MAX_REGISTRY_LENGTH;
 let MAX_BYTES;
@@ -282,6 +292,7 @@ class ClipboardIndicator extends PanelMenu.Button {
          */
         this.entries = entries;
         this.favoriteEntries = favoriteEntries;
+        Store.cleanupOrphanedImages(entries, favoriteEntries);
         this.currentPage = 0;
 
         this.currentlySelectedEntry = entries.last();
@@ -560,13 +571,23 @@ class ClipboardIndicator extends PanelMenu.Button {
       menuItem.label.set_text(this._truncated(entry.text, MAX_VISIBLE_CHARS));
     } else if (entry.type === DS.TYPE_IMAGE) {
       menuItem.label.set_text(_('Image snapshot'));
-      const bytes = GLib.Bytes.new(GLib.base64_decode(entry.image));
-      menuItem.imagePreview = new St.Icon({
-        gicon: Gio.BytesIcon.new(bytes),
-        icon_size: 64,
-        style_class: 'ci-image-preview',
-      });
-      menuItem.actor.insert_child_at_index(menuItem.imagePreview, 1);
+      let gicon;
+      const previewPath = entry.thumbnailFile || entry.imageFile;
+      if (previewPath && GLib.file_test(previewPath, GLib.FileTest.EXISTS)) {
+        gicon = new Gio.FileIcon({ file: Gio.File.new_for_path(previewPath) });
+      } else if (entry.image) {
+        gicon = Gio.BytesIcon.new(
+          GLib.Bytes.new(GLib.base64_decode(entry.image)),
+        );
+      }
+      if (gicon) {
+        menuItem.imagePreview = new St.Icon({
+          gicon,
+          icon_size: 64,
+          style_class: 'ci-image-preview',
+        });
+        menuItem.actor.insert_child_at_index(menuItem.imagePreview, 1);
+      }
     } else {
       throw new TypeError('Unknown type: ' + entry.type);
     }
@@ -576,7 +597,7 @@ class ClipboardIndicator extends PanelMenu.Button {
     if (entry.type === DS.TYPE_TEXT) {
       Store.storeTextEntry(entry.text);
     } else if (entry.type === DS.TYPE_IMAGE) {
-      Store.storeImageEntry(entry.image);
+      Store.storeImageEntry(entry);
     } else {
       throw new TypeError('Unknown type: ' + entry.type);
     }
@@ -643,6 +664,11 @@ class ClipboardIndicator extends PanelMenu.Button {
     }
 
     // Favorites aren't touched when clearing history
+    for (const entry of this.entries) {
+      if (entry.type === DS.TYPE_IMAGE && entry.imageHash) {
+        Store.deleteImageFiles(entry);
+      }
+    }
     this.entries = new DS.LinkedList();
     this.currentPage = 0;
     this.historySection.removeAll();
@@ -657,6 +683,9 @@ class ClipboardIndicator extends PanelMenu.Button {
 
       if (entry.diskId) {
         Store.deleteTextEntry(entry.diskId, entry.favorite);
+      }
+      if (entry.type === DS.TYPE_IMAGE && entry.imageHash) {
+        Store.deleteImageFiles(entry);
       }
     }
 
@@ -694,7 +723,7 @@ class ClipboardIndicator extends PanelMenu.Button {
       if (entry.type === DS.TYPE_TEXT) {
         this._setClipboardText(entry.text);
       } else if (entry.type === DS.TYPE_IMAGE) {
-        this._setClipboardImage(entry.image);
+        this._setClipboardImage(entry);
       } else {
         throw new TypeError('Unknown type: ' + entry.type);
       }
@@ -714,13 +743,20 @@ class ClipboardIndicator extends PanelMenu.Button {
     Clipboard.set_text(St.ClipboardType.PRIMARY, text);
   }
 
-  _setClipboardImage(image) {
+  _setClipboardImage(entry) {
+    const bytes = Store.loadImageBytes(entry);
+    if (!bytes) {
+      this._showNotification(_('Image is no longer available'));
+      return;
+    }
     if (this._debouncing !== undefined) {
       this._debouncing++;
     }
-
-    const bytes = GLib.Bytes.new(GLib.base64_decode(image));
-    Clipboard.set_content(St.ClipboardType.CLIPBOARD, 'image/png', bytes);
+    Clipboard.set_content(
+      St.ClipboardType.CLIPBOARD,
+      entry.imageMime || 'image/png',
+      bytes,
+    );
   }
 
   _triggerPasteHack() {
@@ -798,6 +834,13 @@ class ClipboardIndicator extends PanelMenu.Button {
         entry.type === DS.TYPE_TEXT &&
         (entry.text.toLowerCase().includes(query.toLowerCase()) ||
           searchExp?.test(entry.text))
+      ) {
+        entries.push(entry);
+      } else if (
+        entry.type === DS.TYPE_IMAGE &&
+        `image snapshot screenshot ${entry.imageMime || ''}`.includes(
+          query.toLowerCase(),
+        )
       ) {
         entries.push(entry);
       }
@@ -913,13 +956,12 @@ class ClipboardIndicator extends PanelMenu.Button {
       return;
     }
 
-    if (Clipboard.get_mimetypes(clipboardType).includes('image/png')) {
-      Clipboard.get_content(clipboardType, 'image/png', (_, bytes) => {
+    const mimeTypes = Clipboard.get_mimetypes(clipboardType);
+    const imageMime = IMAGE_MIMES.find((mime) => mimeTypes.includes(mime));
+    if (imageMime) {
+      Clipboard.get_content(clipboardType, imageMime, (_, bytes) => {
         if (bytes?.get_size() > 0) {
-          this._processClipboardImage(
-            GLib.base64_encode(bytes.get_data()),
-            true,
-          );
+          this._processClipboardImage(bytes, imageMime, true);
         } else {
           Clipboard.get_text(clipboardType, (_, text) => {
             this._processClipboardContent(text, true);
@@ -1012,24 +1054,37 @@ class ClipboardIndicator extends PanelMenu.Button {
     return text;
   }
 
-  _processClipboardImage(image, selectEntry) {
+  _processClipboardImage(bytes, mime, selectEntry) {
     if (this._debouncing > 0) {
       this._debouncing--;
       return;
     }
-    if (!image) {
+    if (!bytes?.get_size()) {
+      return;
+    }
+    if (bytes.get_size() > MAX_IMAGE_BYTES) {
+      this._showNotification(_('Image is too large for clipboard history'));
       return;
     }
 
+    bytes = this._normalizeImage(bytes);
+    if (!bytes || bytes.get_size() > MAX_IMAGE_BYTES) {
+      this._showNotification(_('Unable to store clipboard image'));
+      return;
+    }
+    mime = 'image/png';
+
+    const imageHash = GLib.compute_checksum_for_bytes(
+      GLib.ChecksumType.SHA256,
+      bytes,
+    );
     let entry =
-      this.entries.findImageItem(image) ||
-      this.favoriteEntries.findImageItem(image);
+      this.entries.findImageItem(imageHash) ||
+      this.favoriteEntries.findImageItem(imageHash);
     if (entry) {
       const isFirst =
         entry === this.entries.last() || entry === this.favoriteEntries.last();
-      if (!isFirst) {
-        this._moveEntryFirst(entry);
-      }
+      if (!isFirst) this._moveEntryFirst(entry);
       if (selectEntry && (!isFirst || entry !== this.currentlySelectedEntry)) {
         this._selectEntry(entry, false);
       }
@@ -1038,23 +1093,57 @@ class ClipboardIndicator extends PanelMenu.Button {
       entry.id = this.nextId++;
       entry.diskId = CACHE_ONLY_FAVORITES ? undefined : this.nextDiskId++;
       entry.type = DS.TYPE_IMAGE;
-      entry.image = image;
+      entry.imageHash = imageHash;
+      entry.imageMime = mime;
+      entry.imageSize = bytes.get_size();
+      entry.imageFile = Store.persistImage(bytes, imageHash, mime);
+      entry.thumbnailFile = this._createImageThumbnail(entry);
       entry.favorite = false;
       this.entries.append(entry);
       this.currentPage = 0;
       this._renderHistoryPage();
-      if (selectEntry) {
-        this._selectEntry(entry, false);
-      }
-
-      if (!CACHE_ONLY_FAVORITES) {
-        this._storeEntry(entry);
-      }
+      if (selectEntry) this._selectEntry(entry, false);
+      if (!CACHE_ONLY_FAVORITES) this._storeEntry(entry);
       this._pruneOldestEntries();
     }
 
     if (NOTIFY_ON_COPY) {
       this._showNotification(_('Image copied to clipboard'));
+    }
+  }
+
+  _normalizeImage(bytes) {
+    const loader = new GdkPixbuf.PixbufLoader();
+    try {
+      loader.write(bytes.get_data());
+      loader.close();
+      const pixbuf = loader.get_pixbuf();
+      if (!pixbuf) return null;
+      const [success, pngBytes] = pixbuf.save_to_bufferv('png', [], []);
+      return success ? GLib.Bytes.new(pngBytes) : null;
+    } catch (e) {
+      try {
+        loader.close();
+      } catch {}
+      console.error(e);
+      return null;
+    }
+  }
+
+  _createImageThumbnail(entry) {
+    const thumbnailPath = Store.getThumbnailPath(entry.imageHash);
+    try {
+      const pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+        entry.imageFile,
+        THUMBNAIL_SIZE,
+        THUMBNAIL_SIZE,
+        true,
+      );
+      pixbuf.savev(thumbnailPath, 'png', [], []);
+      return thumbnailPath;
+    } catch (e) {
+      console.error(e);
+      return null;
     }
   }
 

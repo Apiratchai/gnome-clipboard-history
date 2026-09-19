@@ -20,6 +20,8 @@ const OLD_REGISTRY_FILE = GLib.build_filenamev([
  *   on the order in which these add ops are discovered.
  */
 let DATABASE_FILE;
+let IMAGE_DIR;
+let THUMBNAIL_DIR;
 const BYTE_ORDER = Gio.DataStreamByteOrder.LITTLE_ENDIAN;
 
 // Don't use zero b/c DataInputStream uses 0 as its error value
@@ -41,14 +43,122 @@ export function init(uuid) {
   EXTENSION_UUID = uuid;
   CACHE_DIR = GLib.build_filenamev([GLib.get_user_cache_dir(), EXTENSION_UUID]);
   DATABASE_FILE = GLib.build_filenamev([CACHE_DIR, 'database.log']);
+  IMAGE_DIR = GLib.build_filenamev([CACHE_DIR, 'images']);
+  THUMBNAIL_DIR = GLib.build_filenamev([CACHE_DIR, 'thumbnails']);
 
-  if (GLib.mkdir_with_parents(CACHE_DIR, 0o775) !== 0) {
+  if (
+    GLib.mkdir_with_parents(CACHE_DIR, 0o775) !== 0 ||
+    GLib.mkdir_with_parents(IMAGE_DIR, 0o775) !== 0 ||
+    GLib.mkdir_with_parents(THUMBNAIL_DIR, 0o775) !== 0
+  ) {
     console.log(
       EXTENSION_UUID,
       "Failed to create cache dir, extension likely won't work",
       CACHE_DIR,
     );
   }
+}
+
+function _imageExtension(mime) {
+  return (
+    {
+      'image/jpeg': 'jpg',
+      'image/webp': 'webp',
+      'image/gif': 'gif',
+      'image/bmp': 'bmp',
+    }[mime] || 'png'
+  );
+}
+
+function _cachePath(directory, storedPath) {
+  if (!storedPath) return null;
+  return GLib.build_filenamev([directory, GLib.path_get_basename(storedPath)]);
+}
+
+function _cacheFilename(path) {
+  return path ? GLib.path_get_basename(path) : null;
+}
+
+export function persistImage(bytes, hash, mime) {
+  const imageFile = GLib.build_filenamev([
+    IMAGE_DIR,
+    `${hash}.${_imageExtension(mime)}`,
+  ]);
+  const file = Gio.File.new_for_path(imageFile);
+  file.replace_contents(
+    bytes.get_data(),
+    null,
+    false,
+    Gio.FileCreateFlags.PRIVATE,
+    null,
+  );
+  return imageFile;
+}
+
+export function getThumbnailPath(hash) {
+  return GLib.build_filenamev([THUMBNAIL_DIR, `${hash}.png`]);
+}
+
+export function loadImageBytes(entry) {
+  if (entry.image) {
+    return GLib.Bytes.new(GLib.base64_decode(entry.image));
+  }
+  if (!entry.imageFile) {
+    return null;
+  }
+  try {
+    const [, contents] = Gio.File.new_for_path(entry.imageFile).load_contents(
+      null,
+    );
+    return GLib.Bytes.new(contents);
+  } catch (e) {
+    console.error(e);
+    return null;
+  }
+}
+
+export function deleteImageFiles(entry) {
+  for (const path of [entry.imageFile, entry.thumbnailFile]) {
+    if (!path) continue;
+    try {
+      Gio.File.new_for_path(path).delete(null);
+    } catch (e) {
+      if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_FOUND))
+        console.error(e);
+    }
+  }
+}
+
+function _cleanupDirectory(directory, keepPaths) {
+  const dir = Gio.File.new_for_path(directory);
+  try {
+    const enumerator = dir.enumerate_children(
+      'standard::name',
+      Gio.FileQueryInfoFlags.NONE,
+      null,
+    );
+    let info;
+    while ((info = enumerator.next_file(null))) {
+      const path = GLib.build_filenamev([directory, info.get_name()]);
+      if (!keepPaths.has(path)) Gio.File.new_for_path(path).delete(null);
+    }
+    enumerator.close(null);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+export function cleanupOrphanedImages(entries, favorites) {
+  const keepImages = new Set();
+  const keepThumbnails = new Set();
+  for (const list of [entries, favorites]) {
+    for (const entry of list) {
+      if (entry.imageFile) keepImages.add(entry.imageFile);
+      if (entry.thumbnailFile) keepThumbnails.add(entry.thumbnailFile);
+    }
+  }
+  _cleanupDirectory(IMAGE_DIR, keepImages);
+  _cleanupDirectory(THUMBNAIL_DIR, keepThumbnails);
 }
 
 export function destroy() {
@@ -152,8 +262,32 @@ function _consumeStream(stream, state, callback) {
           const node = new DS.LLNode();
           node.diskId = node.id = state.nextId++;
           node.type = DS.TYPE_IMAGE;
-          node.image = image || '';
           node.favorite = false;
+
+          try {
+            const metadata = JSON.parse(image || '');
+            if (
+              (metadata.v === 2 || metadata.v === 3) &&
+              metadata.hash &&
+              metadata.file
+            ) {
+              node.imageHash = metadata.hash;
+              node.imageMime = metadata.mime || 'image/png';
+              node.imageSize = metadata.size || 0;
+              // v2 wrote absolute cache paths. Resolve both v2 and v3 by
+              // basename so history remains portable across users/machines.
+              node.imageFile = _cachePath(IMAGE_DIR, metadata.file);
+              node.thumbnailFile = _cachePath(
+                THUMBNAIL_DIR,
+                metadata.thumbnail,
+              );
+            } else {
+              node.image = image || '';
+            }
+          } catch {
+            // Legacy v1 entries stored the full PNG as base64 in database.log.
+            node.image = image || '';
+          }
           state.entries.append(node);
 
           loop();
@@ -368,7 +502,7 @@ export function resetDatabase(currentStateBuilder) {
             if (entry.type === DS.TYPE_TEXT) {
               _storeTextOp(entry.text)(dataStream);
             } else if (entry.type === DS.TYPE_IMAGE) {
-              _storeImageOp(entry.image)(dataStream);
+              _storeImageOp(entry)(dataStream);
             } else {
               throw new TypeError('Unknown type: ' + entry.type);
             }
@@ -400,14 +534,24 @@ function _storeTextOp(text) {
   };
 }
 
-export function storeImageEntry(image) {
-  _appendBytesToLog(_storeImageOp(image), -5);
+export function storeImageEntry(entry) {
+  _appendBytesToLog(_storeImageOp(entry), -5);
 }
 
-function _storeImageOp(image) {
+function _storeImageOp(entry) {
   return (dataStream) => {
     dataStream.put_byte(OP_TYPE_SAVE_IMAGE, null);
-    dataStream.put_string(image, null);
+    const payload = entry.imageHash
+      ? JSON.stringify({
+          v: 3,
+          hash: entry.imageHash,
+          mime: entry.imageMime,
+          size: entry.imageSize,
+          file: _cacheFilename(entry.imageFile),
+          thumbnail: _cacheFilename(entry.thumbnailFile),
+        })
+      : entry.image || '';
+    dataStream.put_string(payload, null);
     dataStream.put_byte(0, null); // NUL terminator
     return true;
   };
