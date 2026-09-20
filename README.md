@@ -52,8 +52,8 @@ A note on versioning:
 
 ```shell
 cd ~/.local/share/gnome-shell/extensions/ && \
-  git clone https://github.com/SUPERCILEX/gnome-clipboard-history.git clipboard-history@alexsaveau.dev && \
-  cd clipboard-history@alexsaveau.dev && \
+  git clone https://github.com/Apiratchai/gnome-clipboard-history.git clipboard-history@apiratchai && \
+  cd clipboard-history@apiratchai && \
   make
 ```
 
@@ -64,5 +64,5 @@ cd ~/.local/share/gnome-shell/extensions/ && \
 ### Install
 
 ```shell
-gnome-extensions enable clipboard-history@alexsaveau.dev
+gnome-extensions enable clipboard-history@apiratchai
 ```
