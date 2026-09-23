@@ -43,6 +43,8 @@ const SETTING_KEY_NEXT_ENTRY = 'next-entry';
 const SETTING_KEY_TOGGLE_MENU = 'toggle-menu';
 const SETTING_KEY_PRIVATE_MODE = 'toggle-private-mode';
 const INDICATOR_ICON = 'edit-paste-symbolic';
+const TERMINAL_APP_PATTERN =
+  /terminal|console|kitty|alacritty|wezterm|ghostty|foot|konsole|xterm|tilix|terminator|terminology|qterminal|lxterminal/i;
 
 const PAGE_SIZE = 50;
 const MAX_VISIBLE_CHARS = 200;
@@ -759,35 +761,41 @@ class ClipboardIndicator extends PanelMenu.Button {
     );
   }
 
+  _isTerminalPasteTarget() {
+    try {
+      const appId =
+        Shell.WindowTracker.get_default().get_focus_app()?.get_id?.() || '';
+      return TERMINAL_APP_PATTERN.test(appId);
+    } catch {
+      return false;
+    }
+  }
+
   _triggerPasteHack() {
     this._pasteHackCallbackId = GLib.timeout_add(
       GLib.PRIORITY_DEFAULT,
       1, // Just post to the end of the event loop
       () => {
+        const CTRL_L = 29;
         const SHIFT_L = 42;
+        const V = 47;
         const INSERT = 110;
 
         const eventTime = Clutter.get_current_event_time() * 1000;
-        VirtualKeyboard().notify_key(
-          eventTime,
-          SHIFT_L,
-          Clutter.KeyState.PRESSED,
-        );
-        VirtualKeyboard().notify_key(
-          eventTime,
-          INSERT,
-          Clutter.KeyState.PRESSED,
-        );
-        VirtualKeyboard().notify_key(
-          eventTime,
-          INSERT,
-          Clutter.KeyState.RELEASED,
-        );
-        VirtualKeyboard().notify_key(
-          eventTime,
-          SHIFT_L,
-          Clutter.KeyState.RELEASED,
-        );
+        const keyboard = VirtualKeyboard();
+        if (this._isTerminalPasteTarget()) {
+          keyboard.notify_key(eventTime, CTRL_L, Clutter.KeyState.PRESSED);
+          keyboard.notify_key(eventTime, SHIFT_L, Clutter.KeyState.PRESSED);
+          keyboard.notify_key(eventTime, V, Clutter.KeyState.PRESSED);
+          keyboard.notify_key(eventTime, V, Clutter.KeyState.RELEASED);
+          keyboard.notify_key(eventTime, SHIFT_L, Clutter.KeyState.RELEASED);
+          keyboard.notify_key(eventTime, CTRL_L, Clutter.KeyState.RELEASED);
+        } else {
+          keyboard.notify_key(eventTime, SHIFT_L, Clutter.KeyState.PRESSED);
+          keyboard.notify_key(eventTime, INSERT, Clutter.KeyState.PRESSED);
+          keyboard.notify_key(eventTime, INSERT, Clutter.KeyState.RELEASED);
+          keyboard.notify_key(eventTime, SHIFT_L, Clutter.KeyState.RELEASED);
+        }
 
         this._pasteHackCallbackId = undefined;
         return false;
