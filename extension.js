@@ -872,7 +872,9 @@ class ClipboardIndicator extends PanelMenu.Button {
     const start = this.currentPage * PAGE_SIZE;
     const query = this.searchEntry.get_text();
     for (const entry of entries.slice(start, start + PAGE_SIZE)) {
-      this._addEntry(entry, this.currentlySelectedEntry === entry);
+      // Rendering must never write the clipboard: the currently selected entry
+      // may be stale (e.g. right after a new copy) and would clobber it.
+      this._addEntry(entry, this.currentlySelectedEntry === entry, false);
       if (query && entry.type === DS.TYPE_TEXT) {
         let match = entry.text.toLowerCase().indexOf(query.toLowerCase());
         if (match < 0) {
