@@ -43,6 +43,8 @@ const SETTING_KEY_NEXT_ENTRY = 'next-entry';
 const SETTING_KEY_TOGGLE_MENU = 'toggle-menu';
 const SETTING_KEY_PRIVATE_MODE = 'toggle-private-mode';
 const INDICATOR_ICON = 'edit-paste-symbolic';
+const TERMINAL_APP_PATTERN =
+  /terminal|console|kitty|alacritty|wezterm|ghostty|foot|konsole|xterm|tilix|terminator|terminology|qterminal|lxterminal/i;
 
 const PAGE_SIZE = 50;
 const MAX_VISIBLE_CHARS = 200;
@@ -197,25 +199,32 @@ class ClipboardIndicator extends PanelMenu.Button {
     actionsSection.actor.add_child(actionsBox);
     this.menu.addMenuItem(actionsSection);
 
-    const prevPage = new PopupMenu.PopupBaseMenuItem();
-    prevPage.add_child(
+    this.prevPage = new PopupMenu.PopupBaseMenuItem();
+    this.prevPage.add_child(
       new St.Icon({
         icon_name: 'go-previous-symbolic',
         style_class: 'popup-menu-icon',
       }),
     );
-    prevPage.connect('activate', this._navigatePrevPage.bind(this));
-    actionsBox.add_child(prevPage);
+    this.prevPage.connect('activate', this._navigatePrevPage.bind(this));
+    actionsBox.add_child(this.prevPage);
 
-    const nextPage = new PopupMenu.PopupBaseMenuItem();
-    nextPage.add_child(
+    this.pageLabel = new St.Label({
+      text: '1/1',
+      style_class: 'ci-page-label',
+      y_align: Clutter.ActorAlign.CENTER,
+    });
+    actionsBox.add_child(this.pageLabel);
+
+    this.nextPage = new PopupMenu.PopupBaseMenuItem();
+    this.nextPage.add_child(
       new St.Icon({
         icon_name: 'go-next-symbolic',
         style_class: 'popup-menu-icon',
       }),
     );
-    nextPage.connect('activate', this._navigateNextPage.bind(this));
-    actionsBox.add_child(nextPage);
+    this.nextPage.connect('activate', this._navigateNextPage.bind(this));
+    actionsBox.add_child(this.nextPage);
 
     actionsBox.add_child(new St.BoxLayout({ x_expand: true }));
 
@@ -286,6 +295,7 @@ class ClipboardIndicator extends PanelMenu.Button {
         this.entries = entries;
         this.favoriteEntries = favoriteEntries;
         Store.cleanupOrphanedImages(entries, favoriteEntries);
+        this.currentPage = 0;
 
         this.currentlySelectedEntry = entries.last();
         this._restoreFavoritedEntries();
@@ -662,7 +672,9 @@ class ClipboardIndicator extends PanelMenu.Button {
       }
     }
     this.entries = new DS.LinkedList();
+    this.currentPage = 0;
     this.historySection.removeAll();
+    this._updatePaginationControls(0);
 
     Store.resetDatabase(this._currentStateBuilder.bind(this));
   }
@@ -748,35 +760,41 @@ class ClipboardIndicator extends PanelMenu.Button {
     Clipboard.set_content(St.ClipboardType.PRIMARY, mime, bytes);
   }
 
+  _isTerminalPasteTarget() {
+    try {
+      const appId =
+        Shell.WindowTracker.get_default().get_focus_app()?.get_id?.() || '';
+      return TERMINAL_APP_PATTERN.test(appId);
+    } catch {
+      return false;
+    }
+  }
+
   _triggerPasteHack() {
     this._pasteHackCallbackId = GLib.timeout_add(
       GLib.PRIORITY_DEFAULT,
       1, // Just post to the end of the event loop
       () => {
+        const CTRL_L = 29;
         const SHIFT_L = 42;
+        const V = 47;
         const INSERT = 110;
 
         const eventTime = Clutter.get_current_event_time() * 1000;
-        VirtualKeyboard().notify_key(
-          eventTime,
-          SHIFT_L,
-          Clutter.KeyState.PRESSED,
-        );
-        VirtualKeyboard().notify_key(
-          eventTime,
-          INSERT,
-          Clutter.KeyState.PRESSED,
-        );
-        VirtualKeyboard().notify_key(
-          eventTime,
-          INSERT,
-          Clutter.KeyState.RELEASED,
-        );
-        VirtualKeyboard().notify_key(
-          eventTime,
-          SHIFT_L,
-          Clutter.KeyState.RELEASED,
-        );
+        const keyboard = VirtualKeyboard();
+        if (this._isTerminalPasteTarget()) {
+          keyboard.notify_key(eventTime, CTRL_L, Clutter.KeyState.PRESSED);
+          keyboard.notify_key(eventTime, SHIFT_L, Clutter.KeyState.PRESSED);
+          keyboard.notify_key(eventTime, V, Clutter.KeyState.PRESSED);
+          keyboard.notify_key(eventTime, V, Clutter.KeyState.RELEASED);
+          keyboard.notify_key(eventTime, SHIFT_L, Clutter.KeyState.RELEASED);
+          keyboard.notify_key(eventTime, CTRL_L, Clutter.KeyState.RELEASED);
+        } else {
+          keyboard.notify_key(eventTime, SHIFT_L, Clutter.KeyState.PRESSED);
+          keyboard.notify_key(eventTime, INSERT, Clutter.KeyState.PRESSED);
+          keyboard.notify_key(eventTime, INSERT, Clutter.KeyState.RELEASED);
+          keyboard.notify_key(eventTime, SHIFT_L, Clutter.KeyState.RELEASED);
+        }
 
         this._pasteHackCallbackId = undefined;
         return false;
@@ -805,75 +823,96 @@ class ClipboardIndicator extends PanelMenu.Button {
   }
 
   _maybeRestoreMenuPages() {
-    if (this.activeHistoryMenuItems > 0) {
-      return;
-    }
-
-    for (
-      let entry = this.entries.last();
-      entry && this.activeHistoryMenuItems < PAGE_SIZE;
-      entry = entry.prev
-    ) {
-      // Restoring the selected entry must not touch the clipboard: it may be
-      // stale and would overwrite whatever the user currently has copied.
-      this._addEntry(entry, this.currentlySelectedEntry === entry, false);
-    }
+    this._renderHistoryPage();
   }
 
-  /**
-   * Our pagination implementation is purposefully "broken." The idea is simply to do no unnecessary
-   * work. As a consequence, if a user navigates to some page and then starts copying/moving items,
-   * those items will appear on the currently visible page even though they don't belong there. This
-   * could kind of be considered a feature since it means you can go back to some cluster of copied
-   * items and start copying stuff from the same cluster and have it all show up together.
-   *
-   * Note that over time (as the user copies items), the page reclamation process will morph the
-   * current page into the first page. This is the only way to make the user-visible state match our
-   * backing store after changing pages.
-   *
-   * Also note that the use of `last` and `next` is correct. Menu items are ordered from latest to
-   * oldest whereas `entries` is ordered from oldest to latest.
-   */
+  _getPageEntries() {
+    const query = this.searchEntry.get_text();
+    let searchExp;
+    try {
+      searchExp = query ? new RegExp(query, 'i') : undefined;
+    } catch {}
+
+    const entries = [];
+    for (let entry = this.entries.last(); entry; entry = entry.prev) {
+      if (!query) {
+        entries.push(entry);
+      } else if (
+        entry.type === DS.TYPE_TEXT &&
+        (entry.text.toLowerCase().includes(query.toLowerCase()) ||
+          searchExp?.test(entry.text))
+      ) {
+        entries.push(entry);
+      } else if (
+        entry.type === DS.TYPE_IMAGE &&
+        `image snapshot screenshot ${entry.imageMime || ''}`.includes(
+          query.toLowerCase(),
+        )
+      ) {
+        entries.push(entry);
+      }
+    }
+    return entries;
+  }
+
+  _updatePaginationControls(totalEntries) {
+    const totalPages = Math.max(1, Math.ceil(totalEntries / PAGE_SIZE));
+    this.pageLabel.set_text(`${this.currentPage + 1}/${totalPages}`);
+    this.prevPage.setSensitive(this.currentPage > 0);
+    this.nextPage.setSensitive(this.currentPage + 1 < totalPages);
+  }
+
+  _renderHistoryPage() {
+    const entries = this._getPageEntries();
+    const totalPages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE));
+    this.currentPage = Math.min(this.currentPage, totalPages - 1);
+
+    this.historySection.removeAll();
+    const start = this.currentPage * PAGE_SIZE;
+    const query = this.searchEntry.get_text();
+    for (const entry of entries.slice(start, start + PAGE_SIZE)) {
+      // Rendering must never write the clipboard: the currently selected entry
+      // may be stale (e.g. right after a new copy) and would clobber it.
+      this._addEntry(entry, this.currentlySelectedEntry === entry, false);
+      if (query && entry.type === DS.TYPE_TEXT) {
+        let match = entry.text.toLowerCase().indexOf(query.toLowerCase());
+        if (match < 0) {
+          try {
+            match = entry.text.search(new RegExp(query, 'i'));
+          } catch {}
+        }
+        entry.menuItem.label.set_text(
+          this._truncated(
+            entry.text,
+            match - 40,
+            match + MAX_VISIBLE_CHARS - 40,
+          ),
+        );
+      }
+    }
+    this._updatePaginationControls(entries.length);
+  }
+
   _navigatePrevPage() {
-    if (this.searchEntryFront) {
-      this.populateSearchResults(this.searchEntry.get_text(), false);
+    if (this.currentPage === 0) {
       return;
     }
 
-    const items = this.historySection._getMenuItems();
-    if (items.length === 0) {
-      return;
-    }
-
-    const start = items[0].entry;
-    for (
-      let entry = start.nextCyclic(), i = items.length - 1;
-      entry !== start && i >= 0;
-      entry = entry.nextCyclic()
-    ) {
-      this._rewriteMenuItem(items[i--], entry);
-    }
+    this.currentPage--;
+    this._renderHistoryPage();
   }
 
   _navigateNextPage() {
-    if (this.searchEntryFront) {
-      this.populateSearchResults(this.searchEntry.get_text(), true);
+    const totalPages = Math.max(
+      1,
+      Math.ceil(this._getPageEntries().length / PAGE_SIZE),
+    );
+    if (this.currentPage + 1 >= totalPages) {
       return;
     }
 
-    const items = this.historySection._getMenuItems();
-    if (items.length === 0) {
-      return;
-    }
-
-    const start = items[items.length - 1].entry;
-    for (
-      let entry = start.prevCyclic(), i = 0;
-      entry !== start && i < items.length;
-      entry = entry.prevCyclic()
-    ) {
-      this._rewriteMenuItem(items[i++], entry);
-    }
+    this.currentPage++;
+    this._renderHistoryPage();
   }
 
   _rewriteMenuItem(item, entry) {
@@ -892,90 +931,12 @@ class ClipboardIndicator extends PanelMenu.Button {
 
   _onSearchTextChanged() {
     const query = this.searchEntry.get_text();
-
-    if (!query) {
-      this.historySection.removeAll();
-      this.favoritesSection.removeAll();
-
-      this.searchEntryFront = this.searchEntryBack = undefined;
-      this._restoreFavoritedEntries();
-      this._maybeRestoreMenuPages();
-      return;
-    }
-
-    this.searchEntryFront = this.searchEntryBack = this.entries.last();
-    this.populateSearchResults(query);
-  }
-
-  populateSearchResults(query, forward) {
-    if (!this.searchEntryFront) {
-      return;
-    }
-
-    this.historySection.removeAll();
+    this.currentPage = 0;
     this.favoritesSection.removeAll();
-
-    if (typeof forward !== 'boolean') {
-      forward = true;
+    if (!query) {
+      this._restoreFavoritedEntries();
     }
-
-    query = query.toLowerCase();
-    let searchExp;
-    try {
-      searchExp = new RegExp(query, 'i');
-    } catch {}
-    const start = forward ? this.searchEntryFront : this.searchEntryBack;
-    let entry = start;
-
-    while (this.activeHistoryMenuItems < PAGE_SIZE) {
-      if (entry.type === DS.TYPE_TEXT) {
-        let match = entry.text.toLowerCase().indexOf(query);
-        if (searchExp && match < 0) {
-          match = entry.text.search(searchExp);
-        }
-        if (match >= 0) {
-          this._addEntry(
-            entry,
-            entry === this.currentlySelectedEntry,
-            false,
-            forward ? undefined : 0,
-          );
-          entry.menuItem.label.set_text(
-            this._truncated(
-              entry.text,
-              match - 40,
-              match + MAX_VISIBLE_CHARS - 40,
-            ),
-          );
-        }
-      } else if (entry.type === DS.TYPE_IMAGE) {
-        if (
-          `image snapshot screenshot ${entry.imageMime || ''}`.includes(query)
-        ) {
-          this._addEntry(
-            entry,
-            entry === this.currentlySelectedEntry,
-            false,
-            forward ? undefined : 0,
-          );
-        }
-      } else {
-        throw new TypeError('Unknown type: ' + entry.type);
-      }
-
-      entry = forward ? entry.prevCyclic() : entry.nextCyclic();
-      if (entry === start) {
-        break;
-      }
-    }
-
-    if (forward) {
-      this.searchEntryBack = this.searchEntryFront.nextCyclic();
-      this.searchEntryFront = entry;
-    } else {
-      this.searchEntryFront = this.searchEntryBack.prevCyclic();
-      this.searchEntryBack = entry;
-    }
+    this._renderHistoryPage();
   }
 
   _shouldAbortClipboardQuery(kind) {
@@ -999,11 +960,11 @@ class ClipboardIndicator extends PanelMenu.Button {
   }
 
   _queryClipboard() {
-    if (this._shouldAbortClipboardQuery(St.Clipboard.CLIPBOARD)) {
+    const clipboardType = St.ClipboardType.CLIPBOARD;
+    if (this._shouldAbortClipboardQuery(clipboardType)) {
       return;
     }
 
-    const clipboardType = St.ClipboardType.CLIPBOARD;
     const mimeTypes = Clipboard.get_mimetypes(clipboardType);
     const imageMime = IMAGE_MIMES.find((mime) => mimeTypes.includes(mime));
     if (imageMime) {
@@ -1025,7 +986,7 @@ class ClipboardIndicator extends PanelMenu.Button {
   }
 
   _queryPrimaryClipboard() {
-    if (this._shouldAbortClipboardQuery(St.Clipboard.PRIMARY)) {
+    if (this._shouldAbortClipboardQuery(St.ClipboardType.PRIMARY)) {
       return;
     }
 
@@ -1079,10 +1040,14 @@ class ClipboardIndicator extends PanelMenu.Button {
       entry.text = text;
       entry.favorite = false;
       this.entries.append(entry);
-      this._addEntry(entry, selectEntry, false, 0);
+      this.currentPage = 0;
+      this._renderHistoryPage();
+      if (selectEntry) {
+        this._selectEntry(entry, false);
+      }
 
       if (!CACHE_ONLY_FAVORITES) {
-        Store.storeTextEntry(text);
+        this._storeEntry(entry);
       }
       this._pruneOldestEntries();
     }
@@ -1128,9 +1093,7 @@ class ClipboardIndicator extends PanelMenu.Button {
     if (entry) {
       const isFirst =
         entry === this.entries.last() || entry === this.favoriteEntries.last();
-      if (!isFirst) {
-        this._moveEntryFirst(entry);
-      }
+      if (!isFirst) this._moveEntryFirst(entry);
       if (selectEntry && (!isFirst || entry !== this.currentlySelectedEntry)) {
         this._selectEntry(entry, false);
       }
@@ -1146,11 +1109,10 @@ class ClipboardIndicator extends PanelMenu.Button {
       entry.thumbnailFile = this._createImageThumbnail(entry);
       entry.favorite = false;
       this.entries.append(entry);
-      this._addEntry(entry, selectEntry, false, 0);
-
-      if (!CACHE_ONLY_FAVORITES) {
-        Store.storeImageEntry(entry);
-      }
+      this.currentPage = 0;
+      this._renderHistoryPage();
+      if (selectEntry) this._selectEntry(entry, false);
+      if (!CACHE_ONLY_FAVORITES) this._storeEntry(entry);
       this._pruneOldestEntries();
     }
 
@@ -1216,6 +1178,10 @@ class ClipboardIndicator extends PanelMenu.Button {
     }
 
     entries.append(entry);
+    if (!entry.favorite) {
+      this.currentPage = 0;
+      this._renderHistoryPage();
+    }
     if (entry.diskId) {
       Store.moveEntryToEnd(entry.diskId);
     }
