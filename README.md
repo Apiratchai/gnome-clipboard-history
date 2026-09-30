@@ -36,6 +36,7 @@ will take place.
   - <kbd>Super</kbd> + <kbd>Ctrl</kbd> + <kbd>N</kbd> where `N` is a number from 1 to 9 to select
     the Nth favorited entry.
   - <kbd>Ctrl</kbd> + <kbd>p/n</kbd> to navigate to the previous/next page.
+  - <kbd>←</kbd>/<kbd>→</kbd> to navigate to the previous/next page while browsing the history.
   - <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>S</kbd> to open settings.
   - <kbd>/</kbd> to search.
   - <kbd>F</kbd> to (un)favorite a highlighted item.

@@ -267,6 +267,9 @@ class ClipboardIndicator extends PanelMenu.Button {
     this.menu.actor.connect('key-press-event', (_, event) =>
       this._handleGlobalKeyEvent(event),
     );
+    this.menu.actor.connect('captured-event', (_, event) =>
+      this._handlePageKeyEvent(event),
+    );
 
     Store.buildClipboardStateFromLog(
       (entries, favoriteEntries, nextId, nextDiskId) => {
@@ -379,6 +382,44 @@ class ClipboardIndicator extends PanelMenu.Button {
       return;
     }
 
+    return true;
+  }
+
+  _handlePageKeyEvent(event) {
+    if (event.type() !== Clutter.EventType.KEY_PRESS) {
+      return false;
+    }
+
+    const focus = global.stage.get_key_focus();
+    if (!focus) {
+      return false;
+    }
+
+    // While a query is being edited, Left/Right move the text cursor.
+    if (focus === this.searchEntry && this.searchEntry.get_text()) {
+      return false;
+    }
+
+    const symbol = event.get_key_symbol();
+    let moved;
+    if (symbol === Clutter.KEY_Left) {
+      moved = this._navigatePrevPage();
+    } else if (symbol === Clutter.KEY_Right) {
+      moved = this._navigateNextPage();
+    } else {
+      return false;
+    }
+
+    if (moved) {
+      // Re-rendering destroys the focused item, so focus the edge of the new
+      // page to keep arrow navigation going.
+      const items = this.historySection._getMenuItems();
+      const item =
+        symbol === Clutter.KEY_Left ? items[items.length - 1] : items[0];
+      if (item) {
+        global.stage.set_key_focus(item);
+      }
+    }
     return true;
   }
 
@@ -895,11 +936,12 @@ class ClipboardIndicator extends PanelMenu.Button {
 
   _navigatePrevPage() {
     if (this.currentPage === 0) {
-      return;
+      return false;
     }
 
     this.currentPage--;
     this._renderHistoryPage();
+    return true;
   }
 
   _navigateNextPage() {
@@ -908,11 +950,12 @@ class ClipboardIndicator extends PanelMenu.Button {
       Math.ceil(this._getPageEntries().length / PAGE_SIZE),
     );
     if (this.currentPage + 1 >= totalPages) {
-      return;
+      return false;
     }
 
     this.currentPage++;
     this._renderHistoryPage();
+    return true;
   }
 
   _rewriteMenuItem(item, entry) {
