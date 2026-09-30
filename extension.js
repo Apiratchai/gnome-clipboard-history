@@ -772,6 +772,12 @@ class ClipboardIndicator extends PanelMenu.Button {
       }
 
       if (PASTE_ON_SELECTION && triggerPaste) {
+        // The Shift+Insert paste hack reads PRIMARY, so mirror text there
+        // only at paste time. Mirroring on every selection would hijack
+        // middle-click paste with the selected history entry.
+        if (entry.type === DS.TYPE_TEXT) {
+          Clipboard.set_text(St.ClipboardType.PRIMARY, entry.text);
+        }
         this._triggerPasteHack();
       }
     }
@@ -783,7 +789,6 @@ class ClipboardIndicator extends PanelMenu.Button {
     }
 
     Clipboard.set_text(St.ClipboardType.CLIPBOARD, text);
-    Clipboard.set_text(St.ClipboardType.PRIMARY, text);
   }
 
   _setClipboardImage(entry) {
@@ -798,7 +803,6 @@ class ClipboardIndicator extends PanelMenu.Button {
 
     const mime = entry.imageMime || 'image/png';
     Clipboard.set_content(St.ClipboardType.CLIPBOARD, mime, bytes);
-    Clipboard.set_content(St.ClipboardType.PRIMARY, mime, bytes);
   }
 
   _isTerminalPasteTarget() {
